@@ -1,0 +1,364 @@
+---
+title: 'Data Science Capstone: Baseball Homerun Predictor'
+author: "Andrew Hood"
+date: "March 14, 2024"
+output:
+  pdf_document:
+    df_print: kable
+    number_sections: yes
+    toc: yes
+    fig_caption: yes
+    includes:
+      in_header: preamble.tex
+  html_document: default
+fontsize: 11pt
+include-before: '`\newpage{}`{=latex}'
+urlcolor: blue
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE,
+                      fig.align="center", out.width="70%")
+```
+
+\newpage
+
+# **Introduction**
+
+The Baseball Homerun Prediction project forms the second part of the HarvardX: PH125.9x Data Science: Capstone course; the final course in the Harvardx Data Science Professional Certificate series. This project was a 'choose your own' project. I decided to choose a dataset containing historical baseball batting data. The dataset was downloaded from Kaggle, and was created by Ed King who used data from Sean Lahman's baseball Databank website. The File used for this study is available at: (https://www.kaggle.com/datasets/open-source-sports/baseball-databank?select=Batting.csv). 
+
+The goal of this project was to use two different machine learning methods to predict a player's number of homeruns for a given year. My determination of success for this effort is a Root mean Square Error (RMSE) of less than 4, and an R-Squared value of greater than 0.7. I will also provide the Mean Square Error (MSE), however, I will not be analyzing that metric as RMSE is easier to interpret. MSE is simply provided for user comparison purposes. These benchmarks would allow me to predict home runs within 4 home runs, for 70% of the data. Given the large variation in the data, these cutoffs were deemed acceptable.
+
+This report will begin by exploring the data and performing an initial analysis, and then outline the methods used for the two different models. After that, this report will present the findings from the two models, and then compare them. Finally, a conclusion section will be presented to recap the effort, and identify limitations.
+
+```{r}
+# Define packages to be used, install them if not already installed, and open them with library
+packages <- c("caret", "randomForest", "dplyr", "ggplot2", "knitr", "openxlsx", "kableExtra", "rmarkdown")
+
+for (package in packages) {
+  if (!require(package, character.only = TRUE)) {
+    install.packages(package)
+    library(package, character.only = TRUE)
+  }
+}
+
+# batting dataset Kaggle link
+# https://www.kaggle.com/datasets/open-source-sports/baseball-databank?select=Batting.csv
+
+# Download the data
+dl <- tempfile()
+download.file("https://www.kaggle.com/datasets/open-source-sports/baseball-databank?select=Batting.csv", dl)
+
+# Construct the file path
+path <- "."
+filename <- "batting.csv"
+fullpath <- file.path(path, filename)
+
+# Download the file
+data <- read.csv(fullpath)
+
+# Filter the data to the desired predictors
+batting <- data %>% 
+  select(HR, playerID, yearID, G, AB, BB, SO) %>% 
+  mutate(playerID = as.character(playerID))
+```
+
+# **Initial Analysis**
+
+First, I had to ensure the data was clean by checking for missing values, and then normalizing them. I chose to replace the missing rows with the column medians. I chose the median over the mean because the dataset contained over 100 years of data, and the game of baseball has changed over time, leading the mean to be skewed foe this specific use case.
+
+``` {r - Data Cleaning, include = FALSE}
+# Find complete cases and replace non-completes with column medians
+sum(!complete.cases(batting))
+
+for(i in 1:ncol(batting)) {
+  batting[ , i][is.na(batting[ , i])] <- median(batting[ , i], na.rm=TRUE)
+}
+
+```
+
+When pulled from Kaggle, this dataset was much larger. I decided to trim the dataset down to include five predictors of homerun numbers. These predictors were; yearID, G, AB, BB and SO. I also kept playerID as an identifier. An explanation of each variable is as follows; playerID (A unique player), yearID (A unique year), G (The number of games a player played for a given year), AB (The number of at-bats a player had in a given year), BB (The number of walks a player received in a given year), SO (The number of times a player struck out in a given year).
+
+Firstly, we see that the dataset contained `r format(nrow(batting),big.mark=",",scientific=F)` rows and the columns defined above, the 8th column is the target variable; HR, or the number of homeruns a player hit in a given year. Given the nature of sport, there is variation in the data for each player due to injuries, slumps, and length of career. Below is the first 5 rows of the batting dataset.
+
+```{r - Initial Analysis}
+# Tabulate class of variables and first 5 rows included in edx dataset
+ batting_sum <- rbind((lapply(batting, class)), head(batting))
+```
+
+```{r, echo = FALSE}
+kable(batting_sum, caption = "First 5 Rows of 'batting' dataset")
+```
+
+## Player (\$playerID)
+
+playerID was used as an identifier in this study, similar to how movie was used as an identifier in the first project of the capstone course. However, it is important to note that some players hit more or less homeruns than other players. A certain players homerun numbers in a vacuum could be influenced by strength, skill and quality of pitching faced--- all things not accounted for in this study. Future studies could take these things into account.
+
+## Year (\$yearID)
+
+Analysis of year data revealed that there was a general increase in homeruns hit in any given year. However, as evidenced by the plot below, this increase was not entirely linear. The general trend is positive while still maintaining troughs and peaks over the years. The overall average of homeruns in the dataset was `r round(mean(batting$HR, na.rm = TRUE), 1)`.
+
+```{r - year-effects-1, fig.cap="Distribution of Average Homeruns by Year"}
+# Plot average hr by year
+year_avg <- batting %>%
+  group_by(yearID) %>%
+  summarize(avg_hr = mean(HR)) %>%
+  ungroup()
+
+y_model <- lm(avg_hr ~ yearID, data = year_avg)
+
+rsquared <- summary(y_model)$r.squared
+
+ggplot(year_avg, aes(x = yearID, y = avg_hr)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = FALSE) +
+  labs(title = "Average HR per Year", x = "Year", y = "Average HR") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  annotate("text", x = max(year_avg$yearID), y = min(year_avg$avg_hr), 
+            label = paste("R-squared = ", round(rsquared, digits = 3)), hjust = 1, vjust = -1)
+```
+
+While not a super strong effect, we can see that year does have a slight positive linear correlation with the average number of homeruns hit (0.78).
+
+## Games (\$G)
+
+Next, we will examine the effect of the number of games played (G) on average number of homeruns hit. The average number of games played in the dataset was `r round(mean(batting$G), 1)`. One would assume that a higher number of games played would correlate to a higher amount of home runs hit. That is not always the case as evidenced below. 
+
+```{r - year-effects-2, fig.cap="Distribution of Average Homeruns by Games Played"}
+# Plot average hr by games played
+game_avg <- batting %>%
+  group_by(G) %>%
+  summarize(avg_hr = mean(HR)) %>%
+  ungroup()
+
+g_model <- lm(avg_hr ~ G, data = game_avg)
+
+rsquared <- summary(g_model)$r.squared
+
+ggplot(game_avg, aes(x = G, y = avg_hr)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = FALSE) +
+  labs(title = "Average HR by Games Played", x = "Games Played", y = "Average HR") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  annotate("text", x = max(game_avg$G), y = min(game_avg$avg_hr), 
+            label = paste("R-squared = ", round(rsquared, digits = 3)), hjust = 1, vjust = -1)
+```
+
+From the chart above we see that the average number of home runs hit is relatively flat until slightly more than 50 games are played. After 50 games played, the average number of homeruns follows a slight positive linear trend (0.815). Right around 125 games, the number of average home runs assumes a steeper positive trend. Overall, the trend is exponential in nature; it starts off slow and then rapidly rises further along the x-axis. Given the proximity of the data points to the line of best fit, we can say that games played and average home runs hit are correlated, making G a good predictor of home runs. 
+
+## At-bats (\$AB)
+
+The at-bats (AB) variable  had a mean of `r round(mean(batting$AB), 1)`. One would think that as the number of at-bats increases, the average number of homeruns should also increase due to the higher amount of chances to hit a homerun. However, this is not always the case as shown below.
+
+```{r - year-effects-3, fig.cap="Distribution of Average Homeruns by At-bats"}
+# Plot average hr by games played
+ab_avg <- batting %>%
+  group_by(AB) %>%
+  summarize(avg_hr = mean(HR)) %>%
+  ungroup()
+
+ab_model <- lm(avg_hr ~ AB, data = ab_avg)
+
+rsquared <- summary(ab_model)$r.squared
+
+ggplot(ab_avg, aes(x = AB, y = avg_hr)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = FALSE) +
+  labs(title = "Average HR by Number of At-bats", x = "At-Bats", y = "Average HR") +
+  theme_minimal() +
+  annotate("text", x = max(ab_avg$AB), y = min(ab_avg$avg_hr), 
+            label = paste("R-squared = ", round(rsquared, digits = 3)), hjust = 1, vjust = -1)
+```
+
+The chart above shows a positive linear correlation (0.861) similar to the G variable, however, as the number of at-bats increases, we see an increase in the number of outliers and the distance of the data points from the trend line. This indicates that AB is a good predictor of homeruns for players with less at-bats, but is not as good of a predictor for players with a higher number of at-bats. The at-bats variable will still be an important predictor, but it may not be as accurate as others as its level rises. This variation could potentially be explained by improved scouting reports on players as their number of at-bats rises, and their underlying skill level.
+
+## Walks (\$BB)
+
+The average number of walks in the dataset was `r round(mean(batting$BB), 1)`. Walks were not expected to be a strong predictor of average home runs due to the fact that if you receive a walk, you can not hit a homerun in the same at-bat. However, it is commonplace in baseball to intentionally walk a player who is known to hit a lot of homeruns, or a player who is known to perform above average in high-stress situations. I did expect to see some correlation between walks and average homeruns due to the phenomenon mentioned, this correlation could also potentially account for previously unaccounted effects, such as skill level.
+
+```{r - year-effects-4, fig.cap="Distribution of Average Homeruns by Number of Walks (BB)"}
+# Plot average hr by number of walks
+bb_avg <- batting %>%
+  group_by(BB) %>%
+  summarize(avg_hr = mean(HR)) %>%
+  ungroup()
+
+bb_model <- lm(avg_hr ~ BB, data = bb_avg)
+
+rsquared <- summary(bb_model)$r.squared
+
+ggplot(bb_avg, aes(x = BB, y = avg_hr)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = FALSE) +
+  labs(title = "Average HR vs Number of Walks", x = "Walks", y = "Average HR") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  annotate("text", x = max(bb_avg$BB), y = min(bb_avg$avg_hr), 
+            label = paste("R-squared = ", round(rsquared, digits = 3)), hjust = 1, vjust = -1)
+```
+
+As evidenced above, average number of home runs and number of walks have a relatively strong positive linear correlation (0.829). We also see that as walks increase, the number of outliers increases. As mentioned prior, this could possibly be explained by the effects of skill level or stress level of a given at-bat. Lastly, walks will be an important predictor of average homeruns, due to the correlation shown here and the relation to other unmeasurable effects mentioned.
+
+## Strikeouts (\$SO)
+
+Another truth in baseball is that true 'power hitters' tend to strike out more than their counterparts who are 'contact hitters'. Using this truth, we can identify a relationship between the number of strikeouts and the average number of home runs hit. Below is a chart illustrating the distribution of the average number of home runs by number of strikeouts.
+
+```{r - year-effects-5, fig.cap="Distribution of Average Homeruns by Number of Strikeouts"}
+# Plot average hr by number of walks
+so_avg <- batting %>% 
+  group_by(SO) %>% 
+  mutate(avg_hr = mean(HR)) %>% 
+  select(SO, avg_hr) %>% 
+  distinct(SO, .keep_all = TRUE)
+
+so_model <- lm(avg_hr ~ SO, data = so_avg)
+
+rsquared <- summary(so_model)$r.squared
+
+ggplot(so_avg, aes(x = SO, y = avg_hr)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = FALSE) +
+  labs(title = "Average HR vs Number of Strikeouts", x = "Strikeouts", y = "Average HR") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  annotate("text", x = max(so_avg$SO), y = min(so_avg$avg_hr), 
+            label = paste("R-squared = ", round(rsquared, digits = 3)), hjust = 1, vjust = -1)
+```
+
+As shown above, there is a strong positive linear relationship (0.908) between number of strikeouts and average number of homeruns. This illustrates that strikeouts will be an important factor for the model to accurately predict homeruns.
+
+## Summary
+
+While the five predictors chosen for the model vary in their correlation to average number of homeruns, they will all be useful in the prediction. Higher correlation shown in the graphs above indicates a more direct relationship of a variable on average number of homeruns, whereas, a slightly lower correlation indicates a less direct relationship, but allows us to account for certain 'immeasurables' in the game of baseball described above. The next section will dive deeper into the two machine learning algorithms used for prediction accounting for the variables outlined above.
+
+# **Methods**
+
+Given the variation of the data and the instructions for the project, the first method I chose to use was the Random Forest model. Random Forest allows for a high-accuracy approach using decision trees that will also prevent overfitting the model to the dataset. The second method I chose to employ was the Linear Regression method. I chose this method due to its simplicity and lightweight, fast computation time.
+
+## Preparing and Splitting the Data
+
+Next, I had to split the batting dataset into train and test datasets for use in training the models, and then using them to make predictions. I used the createDataPartition function to achieve the split, and I chose an (80/20) training to test split. I chose 80/20 rather than 50/50 because I wanted to maximize the models' ability to learn patterns and relationships present in the data. I felt that a 50/50 split would have been yielded a large enough training dataset to accurately predict the HR values in the test dataset.
+
+``` {r - Data Split}
+# Split the data into train and test sets
+set.seed(1)
+train_index <- createDataPartition(batting$HR, p = 0.8, list = FALSE)
+train <- batting[train_index, ]
+test <- batting[-train_index, ]
+```
+
+## Random Forest Model
+
+The main model used for this study was a Random Forest model with 100 decision trees. The idea of Random Forest modeling is that the combination of multiple decision trees each trained on random subsets of the data will provide an accurate model to be used for predicting a target variable, in this case HR. The individual predictions are made by averaging the results of each individual decision tree in the model. In this case, the results of 100 trees were averaged to make the predictions.
+
+While simply adding more trees, or tuning the model for the optimal number of trees can improve accuracy, that method was not employed in this study. I chose to not tune the model, and stick with 100 trees due to the limitations of the machine this model was ran on, and runtime constraints. Additionally, 100 trees performed well enough to achieve my stated goal. 
+
+To utilize the Random Forest model, I simply ran a Random Forest with 100 trees on the train dataset, and then used this 
+model to predict homeruns in the test dataset. After that I used postResample to calculate the key evaluation metrics.
+
+``` {r - RF Model}
+rf_model <- randomForest(HR ~ ., data = train, ntree = 100)
+
+# Make predictions on the test set
+predictions_rf <- predict(rf_model, newdata = test)
+
+# Calculate evaluation metrics
+eval_metrics_rf <- postResample(predictions_rf, test$HR)
+```
+
+## Linear Regression Model
+
+Next, after analyzing the five variables presented prior, I felt that a linear regression model accounting for these variables would be a good model to compare to my Random Forest model. Since every variable used for prediction had a linear relationship greater than 0.7 with the average number of homeruns hit, Linear Regression showed promise in its prediction abilities. Since earlier i illustrated the correlation of each variable on the target variable (HR), the next step for that model was to simultaneously account for all five variables, and then use that model to predict the number of homeruns per year in the test dataset. 
+
+First, I ran a Linear Regression model using the five predictors on the train dataset. This established the model for predictions. I then used the model along with the 'predict' function to predict the number of homeruns per year in the test dataset. I then calculated three metrics for evaluation of the model. These three metrics were, Mean Square Error (MSE), Root Mean Square Error (RMSE) and $R^2$. In the next section, we will dive deeper into the results of the model. 
+
+```{r - LR Model}
+lr_model <- lm(HR ~ yearID + G + AB + BB + SO, data = train)
+
+# Make the predictions
+predictions_lr <- predict(lr_model, test)
+
+# Calculate MSE
+mse_lr <- mean((test$HR - predictions_lr)^2)
+
+# Calculate RMSE
+rmse_lr <- sqrt(mse_lr)
+
+# Calculate R-squared
+rsquared_lr <- summary(lr_model)$r.squared
+```
+
+# **Results**
+
+## Random Forest Model
+
+The Random Forest model was accurate enough in the predictions of actual homeruns in the test dataset to achieve both goals stated at the beginning of this report. The key evaluation metrics for the Random Forest model are presented below.
+
+``` {r -  RF Results, include = FALSE}
+results <- data.frame(Method = "RF", MSE = eval_metrics_rf[["RMSE"]]^2, RMSE = eval_metrics_rf[["RMSE"]], R2 = eval_metrics_rf[["Rsquared"]])
+```
+
+```{r, echo = FALSE}
+kable(results, caption = "Random Forest Model Results")
+```
+
+The Random Forest model achieved an RMSE of 3.28 and an $R^2$ of 0.72. Both of these numbers surpassed the goal stated at the beginning of this report. Random Forest modeling is powerful enough to be a more accurate predictor, however, it was limited in it's development for this study. The conclusion section will dive deeper into the limitations of this model.
+
+## Linear Regression Model
+
+The Linear Regression model was moderately accurate in predicting homeruns per year. This disproved my hypothesis that when accounting for all five variables, the correlation would increase. Instead, the table below illustrates that the $R^2$ value actually decreased when accounting for all five variables.
+
+``` {r -  LR model results, include = FALSE}
+eval_metrics_lr <- data.frame(Method = "LR", MSE = mse_lr, RMSE = rmse_lr, R2 = rsquared_lr)
+```
+
+```{r, echo = FALSE}
+kable(eval_metrics_lr, caption = "Linear Regression Model Results")
+```
+
+Despite the $R^2$ value being relatively low, the RMSE was ~3.6, indicating that the Linear Regression model was within ~3.6 homeruns of the actual values in the dataset. Given the simplicity of a Linear Regression model, and the complexity of baseball, this was an acceptable margin error. The chart below illustrates the prediction accuracy.
+
+``` {r - LR Model Chart, fig.cap="Linear Regression Predicted Values vs. Actual Values"}
+# Visualize the RMSE 
+# combine actual and predicted values
+lr_df <- data.frame(Actual = test$HR, Predicted = predictions_lr)
+
+# Plot the deviation
+ggplot(lr_df, aes(x = Actual, y = Predicted)) +
+  geom_point() +
+  geom_abline(intercept = 0, slope = 1, color = "blue", linetype = "dashed") +
+  labs(x = "Actual HR", y = "Predicted HR", title = "Actual vs Predicted HR") +
+  geom_smooth(method = "lm", se = FALSE) +
+  annotate("text", x = max(lr_df$Actual), y = min(lr_df$Predicted), 
+           label = paste("RMSE =", round(rmse_lr, 2)), hjust = 1, vjust = -1)
+```
+
+As evidenced above, the Linear Regression Model was a decent predictor for lower numbers of homeruns, but the spread increase the higher the number of homeruns became. The dashed line indicates the Linear Regression model's fit to the data. Given the table and chart presented above, the Linear Regression model partially met the stated goal with an RMSE below the threshold, but an $R^2$ lower than desired.
+
+## Comparison
+
+Finally, we compare the results of the two models against on another. The table below details the key evaluation metrics for both models.
+
+``` {r - Comparison Table}
+results <- data.frame(Method = "RF", MSE = eval_metrics_rf[["RMSE"]]^2, RMSE = eval_metrics_rf[["RMSE"]], R2 = eval_metrics_rf[["Rsquared"]])
+eval_metrics_lr <- data.frame(Method = "LR", MSE = mse_lr, RMSE = rmse_lr, R2 = rsquared_lr)
+
+final_results <- full_join(results, eval_metrics_lr) 
+```
+
+```{r, echo = FALSE}
+kable(final_results, caption = "Comparison of the two Methods")
+```
+
+
+As evidenced by the table above, the Random Forest model achieved better performance than the Linear Regression model. The Random Forest model achieved and RMSE of 3.28 and an $R^2$ of 0.72. Indicating that the model was within 3.28 homeruns for roughly 72% of the data. Both of these numbers met the goal stated at the beginning of this report. In contrast, the Linear Regression model achieved an RMSE of 3.6 and an $R^2$ of 0.68. Indicating that the model was within 3.6 homeruns for roughly 68% of the data. The RMSE met the goal, but the $R^2$ did not. 
+
+These results were not surprising, as Random Forest is generally accepted to be a more accurate predictor than basic Linear Regression. The next section will explain the limitations of this study, and potential avenues to improve it.
+
+# **Conclusion**
+
+In summary, the goal of this project was to explore new data and create meaningful machine learning insights from it. I chose to use historical baseball homerun data for my analysis. I used five predictors to predict the number of homeruns a player would hit in a year. I employed two different methods of prediction in this study, Random Forest modeling, and Linear Regression. My goal was to accurately predict homerun numbers for more than 70% of the dataset, with a Root Mean Square Error (RMSE) of less than 4. This ensures my methods were accurate, and had a reasonable margin of error. 
+
+The prior section of this report illustrated that Random Forest Modeling yielded a slight increase in accuracy over Linear Regression. However, the Random Forest model was constrained in development due to hardware limitations and the computationally intensive nature of the algorithm. Future efforts on this study should consider using a larger amount of trees, or tuning the model to find the optimal number of trees to maximize prediction accuracy. Future work may also include the use of parallel processing to speed up computation time on the Random Forest model, or adding additional predictors to enhance accuracy.
